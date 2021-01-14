@@ -7,8 +7,9 @@ import socket
 import json
 from pathlib import Path
 from threading import Thread
-from multiprocessing import Manager, Lock
+from multiprocessing import Manager, Lock, freeze_support
 from PIL import Image, ImageTk
+import time
 
 
 
@@ -25,16 +26,16 @@ class GUI(object):
         self.imageoncanvas = self.canvas_1.create_image(0,0,anchor='nw',image=vimage)
         self.canvas_1.pack(expand='true', side='bottom')
         self.button_1 = ttk.Button(self.frame_1)
-        self.button_1.config(text='StartLogging', command = lambda obj = self, key = 'StartLogging':obj.Button(obj,key))
+        self.button_1.config(text='StartLogging', command = lambda obj = self, key = 'StartLogging':obj.Button(key))
         self.button_1.pack(side='left')
         self.button_2 = ttk.Button(self.frame_1)
-        self.button_2.config(text='SaveToXLS', command = lambda obj = self, key = 'SaveToXLS':obj.Button(obj,key))
+        self.button_2.config(text='SaveToXLS', command = lambda obj = self, key = 'SaveToXLS':obj.Button(key))
         self.button_2.pack(side='left')
-        self.button_3 = ttk.Button(self.frame_1, command = lambda obj = self, key = 'Tar':obj.Button(obj,key))
+        self.button_3 = ttk.Button(self.frame_1, command = lambda obj = self, key = 'Tar':obj.Button(key))
         self.button_3.config(text='Tar')
         self.button_3.pack(side='left')
         self.button_4 = ttk.Button(self.frame_1)
-        self.button_4.config(text='ZERO', command = lambda obj = self, key = 'ZERO':obj.Button(obj,key))
+        self.button_4.config(text='ZERO', command = lambda obj = self, key = 'ZERO':obj.Button(key))
         self.button_4.pack(side='left')
         self.labelframe_1 = ttk.Labelframe(self.frame_1)
         self.text_1 = tk.Text(self.labelframe_1)
@@ -58,12 +59,21 @@ class GUI(object):
     def refresh(self):
         self.lock.acquire()
         currentVal = self.shared['Values']['CurrentWeight']
-        image = self.shared['Values']['image']
+        imagebase = filter(lambda item: item[0]>time.time()-60, self.shared['json'].items())
+        array = [[],[]]
+        for number, val in imagebase:
+            array[0].append(number - time.time())
+            array[1].append(float(val[1]))
         label = self.shared['Values']['label']
         self.lock.release()
+        if array[0] and array[1]:
+            plot = pyplot.plot(array)
+            plot.ylabel('Kg')
+            plot.xlabel('time in s')
+            image = plot.figure(figsize=(300,300))
+            self.canvas_1.itemconfig(self.imageoncanvas, image=ImageTk.PhotoImage(image))
         self.text_1.delete('1.0',tk.END)
         self.text_1.insert('1.0',currentVal)
-        self.canvas_1.itemconfig(self.imageoncanvas, image=ImageTk.PhotoImage(image))
         self.label_1.config(text=label)
         self.root.after(300, self.refresh)
 
@@ -89,11 +99,20 @@ class Logger(object):
         self.lock = lock
         self.shared = shared
         self.lock.acquire()
-        self.socket = self.shared['socket']
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.address = self.shared['address']
         self.lock.release()
+        self.time = 0
+        self.timeelapsed = 0
         if self.socket:
-            self.socket.connect()
-            self.mainloop()
+            try:
+                self.socket.connect(self.address)
+            except Exception as e:
+                self.lock.acquire()
+                self.shared['Values']['label'] = repr(e)
+                self.lock.release()
+            else:
+                self.mainloop()
         else:
             self.lock.acquire()
             self.shared['Values']['label'] = 'Unable to connect with weight scale'
@@ -101,6 +120,7 @@ class Logger(object):
 
     def mainloop(self):
         while True:
+            self.elapsed = time.time() - self.time
             self.lock.acquire()
             start = self.shared['Buttons']['StartLogging']
             Tar = self.shared['Buttons']['Tar']
@@ -112,15 +132,89 @@ class Logger(object):
             if ZERO: self.ZERO()
             if logging: self.logging()
 
+    def logging(self):
+        response = ''.encode()
+        err=False
+        while True:
+            response += self.socket.recv(8)
+            if '/r/n' in response.decode():
+                break
+            if not self.framecoherent(response) or len(response.decode())>30:
+                err = True
+                break
+        response = response.decode()
+        if self.timeelapsed > 10 and not err:
+            self.lock.acquire()
+            self.shared['json'].update([(time.time(),response[4:18])])
+            json.dump(self.shared['json'],str(Path(__file__).parent.absolute())+'\\history.json')
+            self.lock.release()
+            self.timeelapsed = 0
+            self.time = time.time()
+
+    def Tar(self):
+        self.socket.sendall('T/r/n'.encode())
+        while True:
+            response = ''.encode()
+            err=False
+            while True:
+                response += self.socket.recv(8)
+                if '/r/n' in response.decode():
+                    break
+                if not self.framecoherent(response.decode()) or len(response.decode())>30:
+                    err = True
+                    break
+            if err: break
+            response = response.decode()
+            taring = 'T A' in response
+            self.lock.acquire()
+            self.shared['State']['WeightScaleBusy']=taring
+            self.shared['Values']['Label']='Taring'
+            self.lock.release()
+            if not taring:
+                break
+        self.lock.acquire()
+        self.shared['Buttons']['ZERO'] = False
+        self.lock.release()
+
+    def ZERO(self):
+        self.socket.sendall('Z/r/n'.encode())
+        while True:
+            response = ''.encode()
+            err=False
+            while True:
+                response += self.socket.recv(8)
+                if '/r/n' in response:
+                    break
+                if not self.framecoherent(response.decode()) or len(response.decode())>30:
+                    err = True
+                    break
+            if err: break
+            response = response.decode()
+            zeroing = 'T A' in response
+            self.lock.acquire()
+            self.shared['State']['WeightScaleBusy']=zeroing
+            self.shared['Values']['Label']='Zeroing'
+            self.lock.release()
+            if not zeroing:
+                break
+        self.lock.acquire()
+        self.shared['Buttons']['ZERO'] = False
+        self.lock.release()
+
     def start(self, alreadyrunning):
-        self.socket.sendall('CU'+str(int(alreadyrunning))+' /r/n')
+        self.socket.sendall(str('CU'+str(int(alreadyrunning))+'/r/n').encode())
         response = ''
         while True:
             response += self.socket.recv(8)
             if '/r/n' in response:
                 break
-            if not self.framecoherent(response):
+            if not self.framecoherent(response.decode()) or len(response.decode())>30:
                 break
+        response = response.decode()
+        if 'CU'+str(int(alreadyrunning))+'A' in response:
+            self.lock.acquire()
+            self.shared['State']['Logging'] = not alreadyrunning
+            self.lock.release()
         self.lock.acquire()
         self.shared['Buttons']['StartLogging'] = False
         self.lock.release()
@@ -156,16 +250,17 @@ class App(object):
     def __init__(self):
         self.Alive = True
         self.configuration = json.load(open(str(Path(__file__).parent.absolute())+'\\config.json'))
+        self.vaddress = ('',8080)
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.bind((self.configuration['Network']['IP'], self.configuration['Network']['port']))
+            self.vaddress=(self.configuration['Network']['IP'], self.configuration['Network']['port'])
         except:
             pass
         self.history = json.load(open(str(Path(__file__).parent.absolute())+'\\history.json'))
         self.shared = Manager()
         self.Lock = Lock()
         self.AppVariable = self.shared.dict({
-            'socket':None if not hasattr(self,'socket') else self.socket,
+            'json':self.shared.dict(self.history),
+            'address':self.vaddress,
             'Buttons':self.shared.dict({
                 'StartLogging':False,
                 'SaveToXLS':False,
@@ -184,8 +279,8 @@ class App(object):
             }),
             'Values':self.shared.dict({
                 'CurrentWeight':'0 kg',
-                'image':Image.new('RGB',(300,300),'#af342f'),
-                'label':'Err'
+                'label':''
+                
             })
 
 
@@ -205,5 +300,6 @@ class App(object):
         for thread in self.Threads: thread.join()
 
 if __name__=='__main__':
+    freeze_support()
     Application = App()
     Application.run()
