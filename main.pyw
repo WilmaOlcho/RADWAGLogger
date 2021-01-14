@@ -137,7 +137,7 @@ class Logger(object):
         err=False
         while True:
             response += self.socket.recv(8)
-            if '/r/n' in response.decode():
+            if '\r\n' in response.decode():
                 break
             if not self.framecoherent(response) or len(response.decode())>30:
                 err = True
@@ -152,13 +152,13 @@ class Logger(object):
             self.time = time.time()
 
     def Tar(self):
-        self.socket.sendall('T/r/n'.encode())
+        self.socket.sendall('T\r\n'.encode())
         while True:
             response = ''.encode()
             err=False
             while True:
                 response += self.socket.recv(8)
-                if '/r/n' in response.decode():
+                if '\r\n' in response.decode():
                     break
                 if not self.framecoherent(response.decode()) or len(response.decode())>30:
                     err = True
@@ -177,13 +177,13 @@ class Logger(object):
         self.lock.release()
 
     def ZERO(self):
-        self.socket.sendall('Z/r/n'.encode())
+        self.socket.sendall('Z\r\n'.encode())
         while True:
             response = ''.encode()
             err=False
             while True:
                 response += self.socket.recv(8)
-                if '/r/n' in response:
+                if '\r\n' in response:
                     break
                 if not self.framecoherent(response.decode()) or len(response.decode())>30:
                     err = True
@@ -202,11 +202,11 @@ class Logger(object):
         self.lock.release()
 
     def start(self, alreadyrunning):
-        self.socket.sendall(str('CU'+str(int(alreadyrunning))+'/r/n').encode())
+        self.socket.sendall(str('CU'+str(int(alreadyrunning))+'\r\n').encode())
         response = ''
         while True:
             response += self.socket.recv(8)
-            if '/r/n' in response:
+            if '\r\n' in response:
                 break
             if not self.framecoherent(response.decode()) or len(response.decode())>30:
                 break
